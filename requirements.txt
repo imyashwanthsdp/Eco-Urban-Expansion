@@ -1,6 +1,10 @@
-flask
-pandas
-numpy
-scikit-learn
-matplotlib
-joblib
+Flask==3.1.6
+werkzeug==3.1.6
+osmnx==1.9.3
+geopandas==1.0.1
+shapely==2.1.2
+geopy==2.4.1
+joblib==1.4.2
+numpy==1.26.4
+scikit-learn==1.8.0
+gunicorn==23.0.0
