@@ -11,6 +11,10 @@ import numpy as np
 app = Flask(__name__)
 app.config['SESSION_COOKIE_NAME'] = 'aqua_guard_session_1'
 
+# Configure OSMnx globally for speed, caching, and cloud safety
+ox.settings.timeout = 10
+ox.settings.use_cache = True
+
 # Dynamic path resolution to ensure the model loads reliably on any cloud host
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "random_forest_model.pkl")
@@ -34,20 +38,24 @@ def safe_features(polygon, tags):
 
 
 def extract_osm_features(polygon):
-    # 1. Area Calculation
+    # 1. Area Calculation (Projected to EPSG:3857 for accurate meter measurements)
     gdf = gpd.GeoDataFrame(index=[0], crs="EPSG:4326", geometry=[polygon])
-    area_km2 = gdf.to_crs(epsg=3857).area.iloc[0] / 10**6
+    gdf_projected = gdf.to_crs(epsg=3857)
+    area_km2 = gdf_projected.geometry.iloc[0].area / 10**6
 
-    # 2. Roads
+    # 2. Roads (Optimized to prevent timeouts and projection warnings)
     try:
         G = ox.graph_from_polygon(polygon, network_type='all_public')
-        if G:
+        if G and len(G.edges) > 0:
             edges = ox.graph_to_gdfs(G, nodes=False)
-            road_length = edges.length.sum() / 1000
+            # Fix projection to safely calculate accurate road lengths
+            edges_projected = edges.to_crs(epsg=3857)
+            road_length = edges_projected.geometry.length.sum() / 1000
             road_density = road_length / area_km2 if area_km2 > 0 else 0
         else:
             road_density = 0
-    except Exception:
+    except Exception as e:
+        print(f"Road extraction timed out or failed: {e}")
         road_density = 0
 
     # 3. Buildings (Population Proxy)
@@ -57,7 +65,7 @@ def extract_osm_features(polygon):
     # 4. Green Cover
     green_cover = safe_features(polygon, {"leisure": "park", "landuse": "forest"}) * 5
 
-    # 5. Distance to Water
+    # 5. Distance to Water (Optimized with error handling)
     min_distance = 5
     try:
         water_gdf = ox.features_from_polygon(polygon, tags={"natural": "water"})
@@ -68,7 +76,8 @@ def extract_osm_features(polygon):
                 dist = geodesic((center.y, center.x), (water_center.y, water_center.x)).km
                 if dist < min_distance:
                     min_distance = dist
-    except Exception:
+    except Exception as e:
+        print(f"Water extraction timed out or failed: {e}")
         min_distance = 5
 
     # 6. Elevation & Flood Risk
@@ -168,5 +177,4 @@ def predict_zone():
 
 
 if __name__ == "__main__":
-    # Local development server fallback
     app.run(debug=True)
