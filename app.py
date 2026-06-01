@@ -1,3 +1,5 @@
+import os
+import traceback
 from flask import Flask, render_template, request, jsonify
 import osmnx as ox
 import geopandas as gpd
@@ -9,33 +11,28 @@ import numpy as np
 app = Flask(__name__)
 app.config['SESSION_COOKIE_NAME'] = 'aqua_guard_session_1'
 
-# -----------------------------
-# Load Trained Random Forest Model
-# -----------------------------
-# Ensure this file exists in your 'models/' folder
+# Dynamic path resolution to ensure the model loads reliably on any cloud host
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "random_forest_model.pkl")
+
 try:
-    model = joblib.load("models/random_forest_model.pkl")
-    print("Model is working on the area")
-except:
-    print("⚠️ Warning: Model not found. Predictions will fail.")
+    model = joblib.load(MODEL_PATH)
+    print("Model loaded successfully and is working on the area.")
+except Exception as e:
+    print(f"⚠️ Warning: Model not found at {MODEL_PATH}. Predictions will use fallbacks. Error: {e}")
     model = None
 
-# -----------------------------
-# Helper: Safe feature extraction
-# -----------------------------
+
 def safe_features(polygon, tags):
     try:
         gdf = ox.features_from_polygon(polygon, tags=tags)
         if gdf is None or gdf.empty:
             return 0
         return len(gdf)
-    except Exception as e:
-        # print("OSMnx feature error:", e)
+    except Exception:
         return 0
 
-# -----------------------------
-# Helper: Extract features
-# -----------------------------
+
 def extract_osm_features(polygon):
     # 1. Area Calculation
     gdf = gpd.GeoDataFrame(index=[0], crs="EPSG:4326", geometry=[polygon])
@@ -50,15 +47,14 @@ def extract_osm_features(polygon):
             road_density = road_length / area_km2 if area_km2 > 0 else 0
         else:
             road_density = 0
-    except:
+    except Exception:
         road_density = 0
 
     # 3. Buildings (Population Proxy)
     building_count = safe_features(polygon, {"building": True})
     pop_density = building_count / area_km2 if area_km2 > 0 else 0
 
-    # 4. Green Cover (Simple Count Proxy)
-    # Ideally, area calculation is better, but keeping logic consistent with your ML training
+    # 4. Green Cover
     green_cover = safe_features(polygon, {"leisure": "park", "landuse": "forest"}) * 5
 
     # 5. Distance to Water
@@ -67,18 +63,15 @@ def extract_osm_features(polygon):
         water_gdf = ox.features_from_polygon(polygon, tags={"natural": "water"})
         if water_gdf is not None and not water_gdf.empty:
             center = polygon.centroid
-            # Find nearest water body roughly
             for _, row in water_gdf.iterrows():
                 water_center = row.geometry.centroid
                 dist = geodesic((center.y, center.x), (water_center.y, water_center.x)).km
                 if dist < min_distance:
                     min_distance = dist
-    except:
+    except Exception:
         min_distance = 5
 
-    # 6. Elevation & Flood Risk (Placeholder)
-    # Using bounding box latitude proxy for elevation if no API available
-    # (Higher latitude doesn't mean higher elevation, but this matches your previous placeholder logic)
+    # 6. Elevation & Flood Risk
     elevation = 30 + (polygon.bounds[3] - polygon.bounds[1]) * 1000 
     flood_risk = max(0, min(1, 1 - elevation / 100))
 
@@ -92,12 +85,11 @@ def extract_osm_features(polygon):
         "area_km2": area_km2
     }
 
-# -----------------------------
-# Routes
-# -----------------------------
+
 @app.route("/")
 def index():
     return render_template("index.html")
+
 
 @app.route("/predict_zone", methods=["POST"])
 def predict_zone():
@@ -124,13 +116,12 @@ def predict_zone():
         if model:
             prediction = model.predict(features_array)[0]
             try:
-                # Get confidence of the predicted class
                 probs = model.predict_proba(features_array)[0]
                 confidence = float(np.max(probs)) * 100
-            except:
+            except Exception:
                 confidence = 0
         else:
-            prediction = 0 # Fallback
+            prediction = 0  # Fallback
             confidence = 0
 
         # Map Prediction to Text
@@ -141,16 +132,11 @@ def predict_zone():
         else:
             decision = "❌ Not Sustainable"
 
-        # ---------------------------------------------------------
-        # 4. Calculate 0-100 Score (For UI Visuals)
-        # ---------------------------------------------------------
-        # We normalize the raw features to a 0-100 scale to create a composite index.
-        # This ensures the gauge chart works even if the ML model is a classifier.
-        
+        # 4. Metrics Normalization for Scoring
         norm_green = min(feats["green_cover"], 100) 
-        norm_infra = min(feats["road_density"] * 5, 100) # Scaling factor for density
+        norm_infra = min(feats["road_density"] * 5, 100)
         norm_pop = min(feats["pop_density"] * 2, 100)
-        norm_flood = (1 - feats["flood_risk"]) * 100 # Inverse risk (Safety)
+        norm_flood = (1 - feats["flood_risk"]) * 100
 
         # Weighted Average Formula
         calculated_score = (
@@ -162,7 +148,7 @@ def predict_zone():
         calculated_score = round(min(max(calculated_score, 0), 100), 1)
 
         return jsonify({
-            "score": calculated_score,          # <--- ADDED THIS for the UI Gauge
+            "score": calculated_score,
             "prediction_class": int(prediction),
             "decision": decision,
             "confidence": round(confidence, 1),
@@ -177,9 +163,10 @@ def predict_zone():
 
     except Exception as e:
         print("ERROR:", e)
-        import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)})
 
+
 if __name__ == "__main__":
+    # Local development server fallback
     app.run(debug=True)
